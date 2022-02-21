@@ -1,6 +1,6 @@
 # This file may be used to create an environment using:
 # $ conda create --prefix "`pwd`/conda_ash_inv" --file ash_inv.yml
-# platform: linux-64
+# platform: linux-64 / windows-64
 json5=0.8.5
 matplotlib=3.3.4
 netcdf4=1.5.3
@@ -14,3 +14,4 @@ psutil=5.6.7
 configargparse=0.14.0
 memory_profiler=0.55
 joblib=1.1.0
+numba=0.53.1

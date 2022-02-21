@@ -42,6 +42,8 @@ import gc
 import psutil
 import importlib
 
+from numba import jit
+
 #Enable this to profile memory
 #from memory_profiler import profile
 
@@ -198,6 +200,7 @@ class AshInversion():
 
 
     #@profile
+    
     def make_system_matrix(self,
                            matched_file_csv_filename,
                            scale_emission=1.0e-9,
@@ -298,6 +301,10 @@ class AshInversion():
             M_data.fill(0.0)
             M_indices.fill(0)
             M_indptr.fill(0)
+        else:
+            M_data = np.empty((1), dtype=np.float64)
+            M_indices = np.empty((1), dtype=np.int64)
+            M_indptr = np.empty((1), dtype=np.int64)
 
         #LSQR system matrix Q and right hand side B
         self.Q = np.zeros((num_emissions, num_emissions), dtype=np.float64)
@@ -370,6 +377,7 @@ class AshInversion():
                         self.logger.warning("Time {:s} exists multiple times in a priori - using first!".format(str(t)))
                         time_index[0] += [i]
                         time_index[1] += [ix[0]]
+                time_index = np.array(time_index, dtype=np.int64)
 
                 if (self.args['verbose'] > 70):
                     self.logger.debug("File times: {:s}, \na priori times: {:s}, \nindices: {:s}".format(str(times), str(self.emission_times), str(time_index)))
@@ -384,6 +392,8 @@ class AshInversion():
 
                 if (use_elevations):
                     obs_alt = nc_file['obs_alt'][:]*1000 #FIXME: Given in KM
+                else:
+                    obs_alt = np.empty((1), dtype=np.float64)
 
                 #Read simulation data from disk
                 sim = nc_file['sim'][:,:,:]
@@ -417,70 +427,33 @@ class AshInversion():
 
             #  Assemble system matrix
             timers['start']['asm'] = time.time()
-            max_i_width = 0
-            for o in range(n_obs):
-                #Set observation and uncertainty of observation
-                self.y_0[obs_counter] = obs[o]*scale_observation
-                current_obs_min_error = obs_min_error if (self.y_0[obs_counter] > obs_zero) else obs_min_error*obs_zero_error_scale
-                current_sigma_o = obs[o]*scale_observation*1.0 #FIXME: constant uncertainty
-                self.sigma_o[obs_counter] = np.sqrt(current_sigma_o**2 + obs_model_error**2 + current_obs_min_error**2)
-
-                #Add observation of ash cloud top (zero ash above top of cloud)
-                altitude_ranges = [slice(0, row.num_altitudes)]
-                if (use_elevations):
-                    #Make a duplicate observation at same lat lon, but with zero above the given altitude
-                    self.y_0[obs_counter+1] = 0
-                    #FIXME: Use small sigma here => assume height information is reliable
-                    #Should perhaps be updated to be a function from cloud top observatoin?
-                    self.sigma_o[obs_counter+1] = np.sqrt(obs_model_error**2 + obs_min_error**2)
-                    altitude_max = min(row.num_altitudes, np.searchsorted(level_altitudes, obs_alt[o]))
-                    altitude_ranges = [slice(0, altitude_max), slice(altitude_max, row.num_altitudes)]
-
-                for altitude_range in altitude_ranges:
-                    #Find valid values and indices
-                    #Valid = not masked index && value > 0 && not masked
-                    timers['start']['asm0'] += time.time()
-                    vals = sim[o, time_index[0], altitude_range].ravel(order='C')
-                    indices = self.ordering_index[altitude_range, time_index[1]].transpose().ravel(order='C')
-
-                    assert (vals.shape == indices.shape), "Number of values {:d} does not match up with number of indices {:d}".format(str(vals.shape), str(indices.shape))
-
-                    valid_vals = np.flatnonzero(indices >= 0)
-                    valid_vals = valid_vals[vals[valid_vals] > 0.0]
-
-                    vals = vals[valid_vals]*scale_emission
-                    indices = indices[valid_vals]
-                    timers['end']['asm0'] += time.time()
-
-                    if (indices.size > 0):
-                        #Compute matrix product Q = M^T sigma_o^-2 M without storing M
-                        #Uses clever (basic) indexing to avoid superfluous copying of data
-                        timers['start']['asm1'] += time.time()
-                        i_min = indices.min()
-                        i_max = indices.max()+1
-                        max_i_width = max(i_max-i_min-1, max_i_width)
-                        v = np.zeros(i_max - i_min)
-                        v[indices-i_min] = vals
-                        V = np.outer(v/(self.sigma_o[obs_counter]**2), v)
-                        timers['end']['asm1'] += time.time()
-                        timers['start']['asm2'] += time.time()
-                        Q_c[i_min:i_max, i_min:i_max] += V
-                        timers['end']['asm2'] += time.time()
-
-                        #Compute matrix product B = M^t sigma_o^-2 (y_0 - M x_a) without storing M
-                        B_c[i_min:i_max] += v*(self.y_0[obs_counter] - np.dot(v, self.x_a[i_min:i_max])) / (self.sigma_o[obs_counter]**2)
-
-                        if (store_full_matrix):
-                            timers['start']['asm3'] += time.time()
-                            nnz_next = nnz_counter+vals.size
-                            M_indices[nnz_counter:nnz_next] = indices
-                            M_data[nnz_counter:nnz_next] = vals
-                            M_indptr[obs_counter+1] = vals.size
-                            nnz_counter = nnz_next
-                            timers['end']['asm3'] += time.time()
-
-                    obs_counter = obs_counter+1
-
+            obs_counter, nnz_counter = AshInversion.assemble(
+                self.y_0,
+                self.sigma_o,
+                self.ordering_index,
+                self.x_a,
+                Q_c,
+                B_c,
+                n_obs,
+                obs.data,
+                scale_observation,
+                scale_emission,
+                obs_zero,
+                obs_min_error,
+                obs_zero_error_scale,
+                obs_model_error,
+                int(row.num_altitudes),
+                int(use_elevations),
+                obs_alt,
+                level_altitudes,
+                time_index,
+                sim.data,
+                int(obs_counter),
+                int(store_full_matrix),
+                int(nnz_counter),
+                M_data,
+                M_indices,
+                M_indptr)
 
             #Increase accuracy by grouping additions
             #(ref Kahan summation and rounding)
@@ -555,7 +528,7 @@ class AshInversion():
             logstr += ["mem={:.1f} GB".format(self.get_memory_usage_gb())]
             for key in timers['start'].keys():
                 logstr += ["{:s}={:.1f} s".format(key, timers['end'][key] - timers['start'][key])]
-            logstr += ["width={:d}".format(max_i_width)]
+            #logstr += ["width={:d}".format(max_i_width)]
             self.logger.info(", ".join(logstr))
 
 
@@ -573,6 +546,103 @@ class AshInversion():
         self.sigma_o = self.sigma_o[:obs_counter]
 
         self.logger.debug("System matrix created.")
+
+    #Assemble using numba
+    @jit(nopython=True)
+    def assemble(
+        y_0,
+        sigma_o,
+        ordering_index,
+        x_a,
+        Q_c,
+        B_c,
+        n_obs,
+        obs,
+        scale_observation,
+        scale_emission,
+        obs_zero,
+        obs_min_error,
+        obs_zero_error_scale,
+        obs_model_error,
+        num_altitudes,
+        use_elevations,
+        obs_alt,
+        level_altitudes,
+        time_index,
+        sim,
+        obs_counter,
+        store_full_matrix,
+        nnz_counter,
+        M_data,
+        M_indices,
+        M_indptr
+    ):
+        if (n_obs == 0): 
+            return obs_counter, nnz_counter
+
+        max_i_width = 0
+        for o in range(n_obs):
+            #Set observation and uncertainty of observation
+            y_0[obs_counter] = obs[o]*scale_observation
+            current_obs_min_error = obs_min_error if (y_0[obs_counter] > obs_zero) else obs_min_error*obs_zero_error_scale
+            current_sigma_o = obs[o]*scale_observation*1.0 #FIXME: constant uncertainty
+            sigma_o[obs_counter] = np.sqrt(current_sigma_o**2 + obs_model_error**2 + current_obs_min_error**2)
+
+            #Add observation of ash cloud top (zero ash above top of cloud)
+            altitude_ranges = [slice(0, num_altitudes)]
+            if (use_elevations):
+                #Make a duplicate observation at same lat lon, but with zero above the given altitude
+                y_0[obs_counter+1] = 0
+                sigma_o[obs_counter+1] = np.sqrt(obs_model_error**2 + (obs_min_error*obs_zero_error_scale)**2)
+                altitude_max = min(num_altitudes, np.searchsorted(level_altitudes, obs_alt[o]))
+                altitude_ranges = [slice(0, altitude_max), slice(altitude_max, num_altitudes)]
+
+            for altitude_range in altitude_ranges:
+                #Find valid values and indices
+                #Valid = not masked index && value > 0 && not masked
+                #vals = sim[o, time_index[0,:], altitude_range].ravel(order='C')
+                vals = sim[o, :, :]
+                vals = vals[time_index[0,:], :]
+                vals = vals[altitude_range].ravel()
+                #indices = ordering_index[altitude_range, time_index[1,:]].transpose().ravel(order='C')
+                indices = ordering_index[altitude_range, time_index[1,:]].transpose().ravel()
+
+                print(vals.shape, indices.shape)
+                print(vals)
+                print(indices)
+                assert (vals.shape == indices.shape)#, "Number of values {:d} does not match up with number of indices {:d}".format(str(vals.shape), str(indices.shape))
+
+                valid_vals = np.flatnonzero(indices >= 0)
+                valid_vals = valid_vals[vals[valid_vals] > 0.0]
+
+                vals = vals[valid_vals]*scale_emission
+                indices = indices[valid_vals]
+
+                if (indices.size > 0):
+                    #Compute matrix product Q = M^T sigma_o^-2 M without storing M
+                    #Uses clever (basic) indexing to avoid superfluous copying of data
+                    i_min = indices.min()
+                    i_max = indices.max()+1
+                    max_i_width = max(i_max-i_min-1, max_i_width)
+                    v = np.zeros(i_max - i_min)
+                    v[indices-i_min] = vals
+                    V = np.outer(v/(sigma_o[obs_counter]**2), v)
+                    Q_c[i_min:i_max, i_min:i_max] += V
+
+                    #Compute matrix product B = M^t sigma_o^-2 (y_0 - M x_a) without storing M
+                    B_c[i_min:i_max] += v*(y_0[obs_counter] - np.dot(v, x_a[i_min:i_max])) / (sigma_o[obs_counter]**2)
+
+                    if (store_full_matrix):
+                        nnz_next = nnz_counter+vals.size
+                        M_indices[nnz_counter:nnz_next] = indices
+                        M_data[nnz_counter:nnz_next] = vals
+                        M_indptr[obs_counter+1] = vals.size
+                        nnz_counter = nnz_next
+
+                obs_counter = obs_counter+1
+
+        return obs_counter, nnz_counter
+
 
 
 
