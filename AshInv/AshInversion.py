@@ -269,7 +269,6 @@ class AshInversion():
         #This forces allocation and initialization of data
         #Really important for speed. Without this, numpy appears to
         #reallocate and move all the data around
-        nnz_counter = 0
         if (store_full_matrix):
             self.logger.info("Storing matrix M explicitly")
             self.logger.info("Will try to allocate {:d}x{:d} matrix with {:d} non-zeros (~{:.1f} GB)".format(
@@ -278,6 +277,7 @@ class AshInversion():
                     total_num_emis,
                     total_num_emis*(8+8)/(1024*1024*1024)))
             #Allocated this way on purpose to force numpy to preallocate data for us
+            M_nnz_counter = 0
             M_data = np.zeros(total_num_emis, dtype=np.float64)
             M_indices = np.zeros(total_num_emis, dtype=np.int64)
             M_indptr = np.zeros(total_num_obs+1, dtype=np.int64)
@@ -286,10 +286,12 @@ class AshInversion():
         self.Q = np.zeros((num_emissions, num_emissions), dtype=np.float64)
         self.B = np.zeros((num_emissions), dtype = np.float64)
         
-        #For faster processing - chunk 
+        #For faster processing - chunk assimilation of observations
         num_obs_per_update = 1000
-        Q_c = np.zeros((num_obs_per_update, num_emissions), dtype=np.float64)
-        sum_counter = 0
+        Q_c_data = np.zeros(num_obs_per_update*num_emissions, dtype=np.float64)
+        Q_c_indices = np.zeros(num_obs_per_update*num_emissions, dtype=np.int64)
+        Q_c_indptr = np.zeros(num_obs_per_update+1, dtype=np.int64)
+        Q_c_nnz_counter = 0
 
         #Right hand sides
         self.y_0 = np.zeros((total_num_obs), dtype=np.float64)
@@ -307,8 +309,17 @@ class AshInversion():
             n_removed = extra_data['n_removed']
             obs_counter = extra_data['obs_counter']
             current_index = extra_data['current_index']
-            nnz_counter = extra_data['nnz_counter']
-            Q_c = extra_data['Q_c']
+            #Q_c = extra_data['Q_c']
+            Q_c_data = extra_data['Q_c_data']
+            Q_c_indices = extra_data['Q_c_indices']
+            Q_c_indptr = extra_data['Q_c_indptr']
+            Q_c_nnz_counter = extra_data['Q_c_nnz_counter']
+            
+            if (store_full_matrix):
+                M_data = extra_data['M_data']
+                M_indices = extra_data['M_indices']
+                M_indptr = extra_data['M_indptr']
+                M_nnz_counter = extra_data['M_nnz_counter']
 
         start_assembly = time.time()
         next_save_time = time.time()
@@ -404,24 +415,30 @@ class AshInversion():
                 timers['start']['asm3'] = 0
                 timers['end']['asm3'] = 0
                 
-            def assemble(Q_c):
+            def assemble(Q_c_data, Q_c_indices, Q_c_indptr, N):
                 """Helper function to avoid code duplication"""
                 timers['start']['asm1'] += time.time()
-                #Scale Q matrix
-                Q_c = Q_c*scale_emission
+                #Create (and scale) sparse matrix
+                Q_c_indptr = np.cumsum(Q_c_indptr)
+                Q_c_data = Q_c_data*scale_emission
+                
+                Q_c = scipy.sparse.csr_matrix((Q_c_data, Q_c_indices, Q_c_indptr), shape=(N, num_emissions))
 
                 #Precompute matrices
-                sigma_o_m2 = np.diag(1/(self.sigma_o[obs_counter-num_obs_per_update:obs_counter]**2))
-                Q_c_sigma_om2 = np.matmul(Q_c.T, sigma_o_m2)
+                indices = np.arange(0, N)
+                indptr = np.append(indices, indices[-1])
+                sigma_o_m2 = self.sigma_o[obs_counter-N:obs_counter]**-2
+                sigma_o_m2 = scipy.sparse.csr_matrix((sigma_o_m2, indices, indptr), shape=(N, N))
+                Q_c_sigma_om2 = (Q_c.T).dot(sigma_o_m2)
                 timers['end']['asm1'] += time.time()
 
                 timers['start']['asm2'] += time.time()
                 #Compute matrix product Q = M^T sigma_o^-2 M without storing M
-                self.Q += np.matmul(Q_c_sigma_om2, Q_c)
-
+                self.Q += Q_c_sigma_om2.dot(Q_c).todense()
+                
                 #Compute matrix product B = M^t sigma_o^-2 (y_0 - M x_a) without storing M
-                self.B += np.matmul(Q_c_sigma_om2, self.y_0[obs_counter-num_obs_per_update:obs_counter] - np.matmul(Q_c, self.x_a))
-                Q_c.fill(0.0)
+                self.B += Q_c_sigma_om2.dot(self.y_0[obs_counter-N:obs_counter] - Q_c.dot(self.x_a))
+                
                 timers['end']['asm2'] += time.time()
                 
 
@@ -446,32 +463,38 @@ class AshInversion():
                     altitude_ranges = [slice(0, altitude_max), slice(altitude_max, row.num_altitudes)]
 
                 for altitude_range in altitude_ranges:
-                    #Assemble the Q_c buffer into Q and B.
-                    if (obs_counter > 0 and obs_counter % num_obs_per_update == 0):
-                        assemble(Q_c)
-                        
                     #Insert simulation values into the Q_c matrix
                     timers['start']['asm0'] += time.time()
                     indices = self.ordering_index[altitude_range, time_index[1]].transpose().ravel(order='C')
                     vals = sim[o, time_index[0], altitude_range].ravel(order='C')
-                    Q_c[obs_counter % num_obs_per_update, indices] = vals
+                    nnz_next = Q_c_nnz_counter+vals.size
+                    Q_c_indices[Q_c_nnz_counter:nnz_next] = indices
+                    Q_c_data[Q_c_nnz_counter:nnz_next] = vals
+                    Q_c_indptr[(obs_counter%num_obs_per_update)+1] = vals.size
+                    Q_c_nnz_counter = nnz_next
                     timers['end']['asm0'] += time.time()
 
                     if (store_full_matrix):
                         timers['start']['asm3'] += time.time()
-                        nnz_next = nnz_counter+vals.size
-                        M_indices[nnz_counter:nnz_next] = indices
-                        M_data[nnz_counter:nnz_next] = vals
+                        nnz_next = M_nnz_counter+vals.size
+                        M_indices[M_nnz_counter:nnz_next] = indices
+                        M_data[M_nnz_counter:nnz_next] = vals
                         M_indptr[obs_counter+1] = vals.size
-                        nnz_counter = nnz_next
+                        M_nnz_counter = nnz_next
                         timers['end']['asm3'] += time.time()
 
                     obs_counter = obs_counter+1
+                    
+                    #Assemble the Q_c buffer into Q and B.
+                    if (obs_counter % num_obs_per_update == 0):
+                        assemble(Q_c_data, Q_c_indices, Q_c_indptr, num_obs_per_update)
+                        Q_c_nnz_counter = 0
 
             #Asseble last set of Q_c observations
             last_row = row_index+1 == matched_files_df.shape[0]
             if (last_row):
-                assemble(Q_c)
+                Q_c_indptr[Q_c_nnz_counter+1:] = 0
+                assemble(Q_c_data, Q_c_indices, Q_c_indptr, num_obs_per_update)
 
             timers['end']['asm'] = time.time()
             timers['end']['tot'] = time.time()
@@ -481,12 +504,19 @@ class AshInversion():
                 self.logger.info("Writing progress file for restarting")
                 current_index = row_index+1
                 extra_data =  {
-                    'Q_c': Q_c,
+                    'Q_c_data': Q_c_data,
+                    'Q_c_indices': Q_c_indices,
+                    'Q_c_indptr': Q_c_indptr,
+                    'Q_c_nnz_counter': Q_c_nnz_counter,
                     'obs_counter': obs_counter,
                     'n_removed': n_removed,
                     'current_index': current_index,
-                    'nnz_counter': nnz_counter
                 }
+                if (store_full_matrix):
+                    extra_data['M_data'] = M_data
+                    extra_data['M_indices'] = M_indices
+                    extra_data['M_indptr'] = M_indptr
+                    extra_data['M_nnz_counter'] = M_nnz_counter
                 self.save_matrices(progress_file, extra_data)
                 next_save_time = time.time() + 5*60
 
@@ -509,11 +539,11 @@ class AshInversion():
 
         #Finally resize matrix to match actually used observations
         if (store_full_matrix):
-            M_indices.resize(nnz_counter)
-            M_data.resize(nnz_counter)
+            M_indices.resize(M_nnz_counter)
+            M_data.resize(M_nnz_counter)
             M_indptr = np.cumsum(M_indptr)
 
-            self.logger.info("Reshaping M from {:d}x{:d} to {:d}x{:d} with {:d} nonzeros".format(total_num_obs, num_emissions, M_indptr.size-1, num_emissions, nnz_counter))
+            self.logger.info("Reshaping M from {:d}x{:d} to {:d}x{:d} with {:d} nonzeros".format(total_num_obs, num_emissions, M_indptr.size-1, num_emissions, M_nnz_counter))
             self.M = scipy.sparse.csr_matrix((M_data, M_indices, M_indptr), shape=(M_indptr.size-1, num_emissions))
 
 
