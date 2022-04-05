@@ -143,7 +143,7 @@ def aPrioriFromDatFile(args, a_priori_file):
     }
 
 
-if __name__ == "__main__":
+def main():
     import configargparse
     logger = logging.getLogger("Main")
 
@@ -235,3 +235,5 @@ if __name__ == "__main__":
     with open(args.a_priori_file, 'w') as outfile:
         json.dump(output, outfile, indent=4)
 
+if __name__ == "__main__":
+    main()

@@ -866,10 +866,7 @@ class AshInversion():
             self.logger.warning("Solution did not converge!")
 
 
-
-
-
-if __name__ == '__main__':
+def main():
     import configargparse
     import sys
     parser = configargparse.ArgParser(description='Run iterative inversion algorithm.')
@@ -1036,3 +1033,8 @@ if __name__ == '__main__':
 
     #Exit
     print("Inversion procedure complete - output in {:s}".format(args.output_dir))
+
+
+
+if __name__ == '__main__':
+    main()

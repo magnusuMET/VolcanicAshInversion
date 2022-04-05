@@ -855,13 +855,7 @@ class MatchFiles:
         return lon, lat, date, data
 
 
-
-
-
-
-
-
-if __name__ == "__main__":
+def main():
     import configargparse
     parser = configargparse.ArgParser(description='Match observations and simulations.')
     parser.add("--verbose", action="store_true", help="Enable verbose mode")
@@ -941,3 +935,7 @@ if __name__ == "__main__":
                       max_distance=args.max_distance,
                       min_time=args.min_time,
                       max_time=args.max_time)
+
+
+if __name__ == "__main__":
+    main()

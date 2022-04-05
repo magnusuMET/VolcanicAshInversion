@@ -102,8 +102,7 @@ def aPosterioriToSourceTerm(filename, outfilename, variable):
                         outfile.write(source_term_str)
 
 
-
-if __name__ == "__main__":
+def main():
     import configargparse
 
     parser = configargparse.ArgParser(description='A posteriori information to EMEP source term.')
@@ -126,3 +125,7 @@ if __name__ == "__main__":
     if (args.json is not None):
         print("Writing output to " + outfile)
         aPosterioriToSourceTerm(args.json, outfile, variable=args.variable)
+
+
+if __name__ == "__main__":
+    main()

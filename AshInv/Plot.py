@@ -23,10 +23,7 @@
 #                                                                            #
 ##############################################################################
 
-if __name__ == "__main__":
-    import matplotlib as mpl
-    mpl.use('Agg')
-
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, TwoSlopeNorm, SymLogNorm
@@ -369,8 +366,9 @@ def plotAshInvMatrix(matrix, fig=None, do_downsample=True, rebin_type='median'):
     return fig
 
 
-if __name__ == "__main__":
+def main():
     import configargparse
+    mpl.use('Agg')
 
     def str2bool(v):
         if isinstance(v, bool):
@@ -416,3 +414,7 @@ if __name__ == "__main__":
     json_file = args.json
     args = {k: v for k, v in vars(args).items() if v is not None}
     makePlotFromJson(json_file, outfile, **args)
+
+
+if __name__ == "__main__":
+    main()
