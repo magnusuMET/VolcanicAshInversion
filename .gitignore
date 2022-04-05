@@ -5,3 +5,5 @@ from_nebula
 input_data/**/*.nc
 AshInv.egg-info
 build
+__pycache__
+.cache
